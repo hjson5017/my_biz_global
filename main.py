@@ -138,11 +138,10 @@ def fetch_multi_country(service_key, strt_yymm, end_yymm, hs_sgn, country_codes)
 # -----------------------------
 st.sidebar.header("조회 조건")
 
-service_key = st.sidebar.text_input(
-    "공공데이터포털 인증키 (serviceKey)",
-    type="password",
-    help="data.go.kr에서 발급받은 디코딩(또는 인코딩) 인증키를 입력하세요.",
-)
+# 인증키는 화면에 직접 입력받지 않고, .streamlit/secrets.toml에서만 불러온다.
+# (secrets.toml 예시)
+#   SERVICE_KEY = "여기에_발급받은_인증키"
+service_key = st.secrets.get("SERVICE_KEY", "")
 
 st.sidebar.subheader("조회 기간 (최대 1년)")
 today = date.today()
@@ -203,7 +202,28 @@ st.title("📦 국가별 · 품목별 수출입실적 분석")
 st.caption("데이터 출처: 관세청_품목별 국가별 수출입실적(GW) Open API (공공데이터포털)")
 
 if not service_key:
-    st.info("왼쪽 사이드바에 공공데이터포털 인증키를 입력한 뒤 '조회하기'를 눌러주세요.")
+    st.error("공공데이터포털 인증키(SERVICE_KEY)가 설정되어 있지 않습니다.")
+    st.markdown(
+        """
+        앱 폴더에 아래와 같이 `.streamlit/secrets.toml` 파일을 만들고 인증키를 저장한 뒤,
+        앱을 다시 실행해주세요.
+
+        ```
+        프로젝트폴더/
+        ├── app.py
+        └── .streamlit/
+            └── secrets.toml
+        ```
+
+        `secrets.toml` 내용:
+        ```toml
+        SERVICE_KEY = "여기에_발급받은_인증키_붙여넣기"
+        ```
+
+        ⚠️ 인증키는 민감정보이므로 깃허브 등에 코드를 올릴 때 `.gitignore`에
+        `.streamlit/secrets.toml`을 추가해서 함께 커밋되지 않도록 해주세요.
+        """
+    )
     st.stop()
 
 if period_error:
