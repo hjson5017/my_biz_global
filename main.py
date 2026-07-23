@@ -6,6 +6,7 @@
 """
 
 import io
+import threading
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
@@ -23,11 +24,16 @@ from urllib3.util.retry import Retry
 # -----------------------------
 API_URL = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
 
-# 공공데이터포털 서버가 순간적으로 응답이 느려지는 경우가 있어,
+# 공공데이터포털은 인증키(계정) 기준으로 "동시 접속 개수"를 제한하는 경우가 많다.
+# ThreadPoolExecutor의 워커 수를 줄이는 것만으로는 부족할 수 있어, 실제로 동시에 나가는
+# HTTP 요청 개수 자체를 세마포어로 강하게 제한한다 (최대 3개까지만 동시 진행).
+_MAX_CONCURRENT_REQUESTS = 3
+_request_semaphore = threading.Semaphore(_MAX_CONCURRENT_REQUESTS)
+
 # 연결 실패/서버 오류 시 자동으로 재시도하는 세션을 만들어 재사용한다.
 _retry_strategy = Retry(
-    total=3,                 # 최대 3회 재시도
-    backoff_factor=1.5,      # 재시도 간격을 점점 늘림 (1.5초, 3초, 6초...)
+    total=4,                 # 최대 4회 재시도
+    backoff_factor=2,        # 재시도 간격을 점점 늘림 (2초, 4초, 8초, 16초...)
     status_forcelist=[429, 500, 502, 503, 504],
     allowed_methods=["GET"],
 )
@@ -152,14 +158,17 @@ def fetch_trade_data(service_key: str, strt_yymm: str, end_yymm: str, hs_sgn: st
     if hs_sgn:
         params["hsSgn"] = hs_sgn
 
-    try:
-        # 타임아웃을 (연결 10초, 응답 대기 30초)로 넉넉하게 주고, 실패 시 _session이 자동 재시도한다.
-        response = _session.get(API_URL, params=params, timeout=(10, 30))
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        # 예외 메시지에 인증키가 포함된 요청 URL이 그대로 들어있을 수 있어 반드시 마스킹한다.
-        safe_msg = _mask_service_key(str(e), service_key)
-        return None, f"API 호출에 실패했습니다: {safe_msg}"
+    # 세마포어를 얻을 때까지 대기했다가(동시 3개까지만 통과) 요청을 보낸다.
+    # 공공데이터포털의 동시 접속 제한에 걸리지 않도록 하기 위함이다.
+    with _request_semaphore:
+        try:
+            # 타임아웃을 (연결 15초, 응답 대기 30초)로 넉넉하게 주고, 실패 시 _session이 자동 재시도한다.
+            response = _session.get(API_URL, params=params, timeout=(15, 30))
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            # 예외 메시지에 인증키가 포함된 요청 URL이 그대로 들어있을 수 있어 반드시 마스킹한다.
+            safe_msg = _mask_service_key(str(e), service_key)
+            return None, f"API 호출에 실패했습니다: {safe_msg}"
 
     return parse_xml_response(response.content)
 
@@ -216,17 +225,19 @@ def fetch_all(
     country_codes: list,
     beauty_all_mode: bool = False,
 ):
-    """선택된 국가들을 병렬(동시)로 호출해서 하나의 DataFrame으로 합친다.
+    """선택된 국가들을 병렬(동시, 최대 3개씩)로 호출해서 하나의 DataFrame으로 합친다.
 
-    국가 하나하나를 순서대로 기다리는 대신 ThreadPoolExecutor로 동시에 요청을 보내서
-    전체 대기시간을 크게 줄인다. (네트워크 응답을 기다리는 시간이 대부분이라 병렬화 효과가 큼)
+    국가 하나하나를 순서대로 기다리는 대신 동시에 요청을 보내되, 공공데이터포털의
+    동시 접속 제한에 걸리지 않도록 실제 요청 수는 세마포어로 제한한다.
+    반환값: (통합 DataFrame, 에러 메시지 리스트, 실패한 국가코드 리스트)
     """
     all_dfs = []
     errors = []
+    failed_countries = []
 
     total = len(country_codes)
     done = 0
-    progress = st.progress(0.0, text="여러 국가를 동시에 조회하는 중입니다...")
+    progress = st.progress(0.0, text="여러 국가를 순차/동시 조회하는 중입니다...")
 
     max_workers = min(5, max(total, 1))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -243,6 +254,9 @@ def fetch_all(
             except Exception as e:  # 개별 국가 호출 실패가 전체를 막지 않도록 처리
                 df, errs = pd.DataFrame(), [f"[{COUNTRY_MAP.get(cnty, cnty)}] 처리 중 오류: {e}"]
 
+            if errs:
+                failed_countries.append(cnty)
+
             if df is not None and not df.empty:
                 all_dfs.append(df)
             errors.extend(errs)
@@ -252,7 +266,7 @@ def fetch_all(
 
     progress.empty()
     combined = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
-    return combined, errors
+    return combined, errors, failed_countries
 
 
 def build_country_ranking(df: pd.DataFrame, top_n: int = 10):
@@ -417,7 +431,7 @@ if run_query:
     # HS Code를 직접 입력하지 않았고 '뷰티전체'를 선택한 경우에만 최적화 모드 사용
     beauty_all_mode = (not custom_hs.strip()) and (category_choice == BEAUTY_ALL_LABEL)
 
-    df, errors = fetch_all(
+    df, errors, failed_countries = fetch_all(
         service_key=service_key,
         strt_yymm=strt_yymm,
         end_yymm=end_yymm,
@@ -444,7 +458,7 @@ if run_query:
     prev_end_yymm = prev_end_date.strftime("%Y%m")
 
     with st.spinner("전년동기 비교 데이터를 함께 불러오는 중입니다..."):
-        df_prev, prev_errors = fetch_all(
+        df_prev, prev_errors, prev_failed_countries = fetch_all(
             service_key=service_key,
             strt_yymm=prev_strt_yymm,
             end_yymm=prev_end_yymm,
@@ -459,6 +473,17 @@ if run_query:
     st.session_state["beauty_trade_df_prev"] = df_prev
     st.session_state["beauty_trade_period"] = (strt_yymm, end_yymm, prev_strt_yymm, prev_end_yymm)
 
+    # 재조회 버튼을 위해 실패한 국가 목록과 이번 조회에 사용한 조건을 저장해둔다.
+    st.session_state["beauty_failed_countries"] = sorted(set(failed_countries) | set(prev_failed_countries))
+    st.session_state["beauty_query_params"] = {
+        "strt_yymm": strt_yymm,
+        "end_yymm": end_yymm,
+        "prev_strt_yymm": prev_strt_yymm,
+        "prev_end_yymm": prev_end_yymm,
+        "hs_code_list": hs_code_list,
+        "beauty_all_mode": beauty_all_mode,
+    }
+
 # 이전 조회 결과가 있으면 재실행 시에도 계속 표시
 df = st.session_state.get("beauty_trade_df")
 df_prev = st.session_state.get("beauty_trade_df_prev")
@@ -466,6 +491,48 @@ df_prev = st.session_state.get("beauty_trade_df_prev")
 if df is None:
     st.info("왼쪽 사이드바에서 조회 조건을 설정하고 '조회하기' 버튼을 눌러주세요.")
     st.stop()
+
+# -----------------------------
+# 실패한 국가만 다시 조회하는 기능
+# -----------------------------
+failed_countries_state = st.session_state.get("beauty_failed_countries", [])
+if failed_countries_state:
+    failed_names = ", ".join(COUNTRY_MAP.get(c, c) for c in failed_countries_state)
+    st.warning(f"다음 국가는 일시적인 접속 문제로 조회하지 못했습니다: {failed_names}")
+    if st.button("⟳ 실패한 국가만 재조회"):
+        q = st.session_state.get("beauty_query_params", {})
+        with st.spinner("실패한 국가를 재조회하는 중입니다..."):
+            retry_df, retry_errors, retry_failed = fetch_all(
+                service_key=service_key,
+                strt_yymm=q.get("strt_yymm", strt_yymm),
+                end_yymm=q.get("end_yymm", end_yymm),
+                hs_code_list=q.get("hs_code_list", []),
+                country_codes=failed_countries_state,
+                beauty_all_mode=q.get("beauty_all_mode", False),
+            )
+            retry_df_prev, retry_prev_errors, retry_prev_failed = fetch_all(
+                service_key=service_key,
+                strt_yymm=q.get("prev_strt_yymm", ""),
+                end_yymm=q.get("prev_end_yymm", ""),
+                hs_code_list=q.get("hs_code_list", []),
+                country_codes=failed_countries_state,
+                beauty_all_mode=q.get("beauty_all_mode", False),
+            )
+
+        for e in retry_errors + retry_prev_errors:
+            st.error(e)
+
+        existing_df = st.session_state.get("beauty_trade_df")
+        existing_df_prev = st.session_state.get("beauty_trade_df_prev")
+        if not retry_df.empty:
+            st.session_state["beauty_trade_df"] = pd.concat([existing_df, retry_df], ignore_index=True)
+        if not retry_df_prev.empty:
+            st.session_state["beauty_trade_df_prev"] = pd.concat([existing_df_prev, retry_df_prev], ignore_index=True)
+
+        st.session_state["beauty_failed_countries"] = sorted(set(retry_failed) | set(retry_prev_failed))
+        st.rerun()
+
+    st.divider()
 
 # -----------------------------
 # YoY 요약: 화장품 수출실적 전체 & 수출 상위 3개국
