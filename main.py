@@ -335,24 +335,84 @@ if run_query:
 
     st.session_state["beauty_trade_df"] = df
 
+    # 전년동기(YoY) 비교를 위해 정확히 12개월 전 동일한 기간의 데이터도 함께 조회한다.
+    prev_start_date = shift_months(start_date, -12)
+    prev_end_date = shift_months(end_date, -12)
+    prev_strt_yymm = prev_start_date.strftime("%Y%m")
+    prev_end_yymm = prev_end_date.strftime("%Y%m")
+
+    with st.spinner("전년동기 비교 데이터를 함께 불러오는 중입니다..."):
+        df_prev, prev_errors = fetch_all(
+            service_key=service_key,
+            strt_yymm=prev_strt_yymm,
+            end_yymm=prev_end_yymm,
+            hs_code_list=hs_code_list,
+            country_codes=selected_countries,
+        )
+
+    if prev_errors:
+        st.caption("※ 전년동기 데이터 일부를 불러오지 못해 YoY 성장률이 부분적으로 표시될 수 있습니다.")
+
+    st.session_state["beauty_trade_df_prev"] = df_prev
+    st.session_state["beauty_trade_period"] = (strt_yymm, end_yymm, prev_strt_yymm, prev_end_yymm)
+
 # 이전 조회 결과가 있으면 재실행 시에도 계속 표시
 df = st.session_state.get("beauty_trade_df")
+df_prev = st.session_state.get("beauty_trade_df_prev")
 
 if df is None:
     st.info("왼쪽 사이드바에서 조회 조건을 설정하고 '조회하기' 버튼을 눌러주세요.")
     st.stop()
 
 # -----------------------------
-# 요약 지표
+# YoY 요약: 화장품 수출실적 전체 & 수출 상위 3개국
 # -----------------------------
-total_exp = df["수출금액(달러)"].sum()
+def compute_yoy(current: float, previous: float):
+    """전년동기 대비 증감률(%)을 계산한다. 비교 불가능하면 None을 반환한다."""
+    if previous is None or pd.isna(previous) or previous == 0:
+        return None
+    return (current - previous) / previous * 100
+
+
+def yoy_delta_text(yoy_value):
+    if yoy_value is None:
+        return "전년동기 데이터 없음"
+    return f"{yoy_value:+.1f}% (전년동기 대비)"
+
+
+st.subheader("📊 화장품 수출실적")
+total_cur = df["수출금액(달러)"].sum()
+total_prev = df_prev["수출금액(달러)"].sum() if df_prev is not None and not df_prev.empty else None
+yoy_total = compute_yoy(total_cur, total_prev)
+st.metric("전체 수출금액 (달러)", f"{total_cur:,.0f}", yoy_delta_text(yoy_total))
+
+st.subheader("🏆 수출 상위 3개국")
+top3 = build_country_ranking(df, 3)
+if top3.empty:
+    st.info("순위를 계산할 데이터가 없습니다.")
+else:
+    top3_cols = st.columns(len(top3))
+    for col, (rank, row) in zip(top3_cols, top3.iterrows()):
+        country_name = row["국가명"]
+        cur_val = row["수출금액(달러)"]
+        prev_val = None
+        if df_prev is not None and not df_prev.empty:
+            matched = df_prev.loc[df_prev["국가명"] == country_name, "수출금액(달러)"].sum()
+            prev_val = matched if matched > 0 else None
+        yoy_country = compute_yoy(cur_val, prev_val)
+        col.metric(f"{rank}위 · {country_name}", f"{cur_val:,.0f} 달러", yoy_delta_text(yoy_country))
+
+st.divider()
+
+# -----------------------------
+# 상세 요약 지표
+# -----------------------------
 total_weight = df["수출중량(kg)"].sum()
 n_countries = df["국가명"].nunique()
 
-m1, m2, m3 = st.columns(3)
-m1.metric("총 수출금액 (달러)", f"{total_exp:,.0f}")
-m2.metric("총 수출중량 (kg)", f"{total_weight:,.0f}")
-m3.metric("조회된 국가 수", f"{n_countries}개국")
+m1, m2 = st.columns(2)
+m1.metric("총 수출중량 (kg)", f"{total_weight:,.0f}")
+m2.metric("조회된 국가 수", f"{n_countries}개국")
 
 st.divider()
 
