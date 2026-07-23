@@ -9,16 +9,43 @@ import io
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
+from urllib.parse import quote
 
 import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # -----------------------------
 # 기본 설정
 # -----------------------------
 API_URL = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
+
+# 공공데이터포털 서버가 순간적으로 응답이 느려지는 경우가 있어,
+# 연결 실패/서버 오류 시 자동으로 재시도하는 세션을 만들어 재사용한다.
+_retry_strategy = Retry(
+    total=3,                 # 최대 3회 재시도
+    backoff_factor=1.5,      # 재시도 간격을 점점 늘림 (1.5초, 3초, 6초...)
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+)
+_session = requests.Session()
+_adapter = HTTPAdapter(max_retries=_retry_strategy)
+_session.mount("https://", _adapter)
+_session.mount("http://", _adapter)
+
+
+def _mask_service_key(text: str, service_key: str) -> str:
+    """에러 메시지에 인증키가 URL 형태로 그대로 노출되지 않도록 마스킹한다."""
+    if not service_key:
+        return text
+    masked = text.replace(service_key, "********")
+    encoded_key = quote(service_key, safe="")
+    if encoded_key and encoded_key != service_key:
+        masked = masked.replace(encoded_key, "********")
+    return masked
 
 st.set_page_config(page_title="화장품 국가별 수출실적 분석", page_icon="💄", layout="wide")
 
@@ -126,10 +153,13 @@ def fetch_trade_data(service_key: str, strt_yymm: str, end_yymm: str, hs_sgn: st
         params["hsSgn"] = hs_sgn
 
     try:
-        response = requests.get(API_URL, params=params, timeout=15)
+        # 타임아웃을 (연결 10초, 응답 대기 30초)로 넉넉하게 주고, 실패 시 _session이 자동 재시도한다.
+        response = _session.get(API_URL, params=params, timeout=(10, 30))
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        return None, f"API 호출에 실패했습니다: {e}"
+        # 예외 메시지에 인증키가 포함된 요청 URL이 그대로 들어있을 수 있어 반드시 마스킹한다.
+        safe_msg = _mask_service_key(str(e), service_key)
+        return None, f"API 호출에 실패했습니다: {safe_msg}"
 
     return parse_xml_response(response.content)
 
@@ -198,7 +228,7 @@ def fetch_all(
     done = 0
     progress = st.progress(0.0, text="여러 국가를 동시에 조회하는 중입니다...")
 
-    max_workers = min(10, max(total, 1))
+    max_workers = min(5, max(total, 1))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_country = {
             executor.submit(
