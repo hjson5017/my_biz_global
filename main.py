@@ -213,15 +213,29 @@ st.sidebar.header("조회 조건")
 #   customs_key = "여기에_발급받은_인증키"
 service_key = st.secrets.get("customs_key", "")
 
+def shift_months(base_date: date, months: int) -> date:
+    """base_date에서 months만큼 개월을 이동한 날짜(해당 월 1일)를 반환한다.
+    months가 음수면 과거로, 양수면 미래로 이동한다."""
+    total = base_date.year * 12 + (base_date.month - 1) + months
+    year, month = divmod(total, 12)
+    return date(year, month + 1, 1)
+
+
 st.sidebar.subheader("조회 기간 (최대 1년)")
 today = date.today()
-default_end = today
-default_start = date(today.year - 1, today.month, 1)
+
+# 관세청 API는 매월 15일경에 전월까지의 자료를 확정·갱신하므로,
+# 아직 집계가 끝나지 않았을 당월 대신 "전월"을 데이터가 존재하는 최신월로 보고 기본값으로 사용한다.
+default_end = shift_months(today, -1)
+# 유효성 검증 기준(최대 12개월, period_months <= 11)에 맞춰 시작월은 종료월의 11개월 전으로 기본 설정
+default_start = shift_months(default_end, -11)
 
 end_date = st.sidebar.date_input("종료년월", value=default_end)
-# 종료년월을 기준으로 1년 전 날짜를 기본 시작년월로 제안하되, 1년 이내에서는 자유롭게 조정 가능
-suggested_start = date(end_date.year - 1, end_date.month, 1)
-start_date = st.sidebar.date_input("시작년월", value=suggested_start)
+start_date = st.sidebar.date_input("시작년월", value=default_start)
+st.sidebar.caption(
+    f"기본값은 데이터가 확정된 최신월(전월) 기준 최근 12개월({default_start.strftime('%Y.%m')} ~ "
+    f"{default_end.strftime('%Y.%m')})입니다. 필요에 따라 자유롭게 조정하세요."
+)
 
 strt_yymm = start_date.strftime("%Y%m")
 end_yymm = end_date.strftime("%Y%m")
