@@ -7,6 +7,7 @@
 
 import io
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
 import pandas as pd
@@ -133,28 +134,91 @@ def fetch_trade_data(service_key: str, strt_yymm: str, end_yymm: str, hs_sgn: st
     return parse_xml_response(response.content)
 
 
-def fetch_all(service_key: str, strt_yymm: str, end_yymm: str, hs_code_list: list, country_codes: list):
-    """선택된 국가 × HS Code 조합을 모두 반복 호출해서 하나의 DataFrame으로 합친다."""
-    all_dfs = []
+def fetch_country_data(
+    service_key: str,
+    strt_yymm: str,
+    end_yymm: str,
+    hs_code_list: list,
+    cnty_cd: str,
+    beauty_all_mode: bool,
+):
+    """국가 1개에 대한 데이터를 모두 가져온다. (스레드에서 실행되는 단위 작업)
+
+    beauty_all_mode가 True이면 hsSgn 없이 1회만 호출해서 전체 품목을 받아온 뒤,
+    화장품 관련 HS Code(3303/3304/3305/3307/3401)로 시작하는 행만 클라이언트에서
+    걸러낸다. 이렇게 하면 카테고리 5개를 각각 호출하는 대신 국가당 1회 호출로 끝난다.
+    """
+    dfs = []
     errors = []
 
-    total_calls = len(country_codes) * max(len(hs_code_list), 1)
-    done = 0
-    progress = st.progress(0.0, text="데이터를 불러오는 중입니다...")
-
-    for cnty in country_codes:
+    if beauty_all_mode:
+        df, err = fetch_trade_data(service_key, strt_yymm, end_yymm, "", cnty_cd)
+        if err:
+            errors.append(f"[{COUNTRY_MAP.get(cnty_cd, cnty_cd)}] {err}")
+        elif df is not None and not df.empty:
+            beauty_prefixes = tuple(
+                prefix for codes in BEAUTY_HS_CATEGORIES.values() for prefix in codes
+            )
+            filtered = df[df["HS코드"].str.startswith(beauty_prefixes, na=False)]
+            if not filtered.empty:
+                dfs.append(filtered)
+    else:
         hs_targets = hs_code_list if hs_code_list else [""]
         for hs in hs_targets:
-            df, err = fetch_trade_data(service_key, strt_yymm, end_yymm, hs, cnty)
+            df, err = fetch_trade_data(service_key, strt_yymm, end_yymm, hs, cnty_cd)
             if err:
-                label = f"{COUNTRY_MAP.get(cnty, cnty)}"
+                label = COUNTRY_MAP.get(cnty_cd, cnty_cd)
                 if hs:
                     label += f" / HS {hs}"
                 errors.append(f"[{label}] {err}")
             elif df is not None and not df.empty:
+                dfs.append(df)
+
+    combined = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    return combined, errors
+
+
+def fetch_all(
+    service_key: str,
+    strt_yymm: str,
+    end_yymm: str,
+    hs_code_list: list,
+    country_codes: list,
+    beauty_all_mode: bool = False,
+):
+    """선택된 국가들을 병렬(동시)로 호출해서 하나의 DataFrame으로 합친다.
+
+    국가 하나하나를 순서대로 기다리는 대신 ThreadPoolExecutor로 동시에 요청을 보내서
+    전체 대기시간을 크게 줄인다. (네트워크 응답을 기다리는 시간이 대부분이라 병렬화 효과가 큼)
+    """
+    all_dfs = []
+    errors = []
+
+    total = len(country_codes)
+    done = 0
+    progress = st.progress(0.0, text="여러 국가를 동시에 조회하는 중입니다...")
+
+    max_workers = min(10, max(total, 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_country = {
+            executor.submit(
+                fetch_country_data, service_key, strt_yymm, end_yymm, hs_code_list, cnty, beauty_all_mode
+            ): cnty
+            for cnty in country_codes
+        }
+        for future in as_completed(future_to_country):
+            cnty = future_to_country[future]
+            try:
+                df, errs = future.result()
+            except Exception as e:  # 개별 국가 호출 실패가 전체를 막지 않도록 처리
+                df, errs = pd.DataFrame(), [f"[{COUNTRY_MAP.get(cnty, cnty)}] 처리 중 오류: {e}"]
+
+            if df is not None and not df.empty:
                 all_dfs.append(df)
+            errors.extend(errs)
+
             done += 1
-            progress.progress(done / total_calls, text=f"{COUNTRY_MAP.get(cnty, cnty)} 조회 중...")
+            progress.progress(done / total, text=f"{COUNTRY_MAP.get(cnty, cnty)} 조회 완료 ({done}/{total})")
 
     progress.empty()
     combined = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
@@ -256,6 +320,11 @@ st.sidebar.caption(
     "※ 위 카테고리는 4단위(호) 기준 대표 분류입니다. 실제 신고 기준 정확한 10자리 HS Code는 "
     "관세청 관세법령정보포털에서 재검증이 필요합니다."
 )
+if category_choice == BEAUTY_ALL_LABEL:
+    st.sidebar.caption(
+        "'뷰티 전체' 선택 시 국가당 API를 1회만 호출한 뒤, 화장품 관련 HS Code만 "
+        "자동으로 걸러내어 보여드립니다 (호출 횟수 절감)."
+    )
 
 custom_hs = st.sidebar.text_input(
     "HS Code 직접 입력 (선택, 최대 10자리)",
@@ -315,6 +384,8 @@ if not selected_countries:
 
 if run_query:
     hs_code_list = [custom_hs.strip()] if custom_hs.strip() else get_hs_code_list(category_choice)
+    # HS Code를 직접 입력하지 않았고 '뷰티전체'를 선택한 경우에만 최적화 모드 사용
+    beauty_all_mode = (not custom_hs.strip()) and (category_choice == BEAUTY_ALL_LABEL)
 
     df, errors = fetch_all(
         service_key=service_key,
@@ -322,6 +393,7 @@ if run_query:
         end_yymm=end_yymm,
         hs_code_list=hs_code_list,
         country_codes=selected_countries,
+        beauty_all_mode=beauty_all_mode,
     )
 
     for e in errors:
@@ -348,6 +420,7 @@ if run_query:
             end_yymm=prev_end_yymm,
             hs_code_list=hs_code_list,
             country_codes=selected_countries,
+            beauty_all_mode=beauty_all_mode,
         )
 
     if prev_errors:
