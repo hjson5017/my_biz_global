@@ -1,7 +1,8 @@
 """
-관세청 품목별 국가별 수출입실적 분석 웹앱
+관세청_화장품 품목별 국가별 수출실적(GW) 분석 웹앱
 - Open API: 관세청_품목별 국가별 수출입실적(GW)
 - 요청주소: https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList
+- 인증키는 st.secrets["customs_key"]에서만 불러오며, 코드에 절대 하드코딩하지 않는다.
 """
 
 import io
@@ -18,69 +19,70 @@ import streamlit as st
 # -----------------------------
 API_URL = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
 
-st.set_page_config(page_title="국가별 수출입실적 분석", page_icon="📦", layout="wide")
+st.set_page_config(page_title="화장품 국가별 수출실적 분석", page_icon="💄", layout="wide")
 
-# 주요 국가코드 - 국가명 매핑 (필요시 자유롭게 추가/수정 가능)
+# 뷰티 수출 관련 주요국 국가코드 - 국가명 매핑 (25개국)
 COUNTRY_MAP = {
     "US": "미국",
     "CN": "중국",
     "JP": "일본",
     "VN": "베트남",
     "HK": "홍콩",
-    "DE": "독일",
-    "IN": "인도",
-    "SG": "싱가포르",
     "TW": "대만",
     "TH": "태국",
+    "SG": "싱가포르",
+    "MY": "말레이시아",
+    "ID": "인도네시아",
+    "PH": "필리핀",
+    "IN": "인도",
+    "AE": "아랍에미리트",
+    "SA": "사우디아라비아",
+    "RU": "러시아",
+    "DE": "독일",
+    "FR": "프랑스",
+    "GB": "영국",
+    "IT": "이탈리아",
     "NL": "네덜란드",
     "AU": "호주",
-    "RU": "러시아",
-    "GB": "영국",
-    "MY": "말레이시아",
+    "CA": "캐나다",
+    "MO": "마카오",
+    "KZ": "카자흐스탄",
+    "UZ": "우즈베키스탄",
 }
 
-# 화장품(HS 3304류) 대표 품목코드 프리셋
-# 참고: 실제 신고 시 사용하는 정확한 10자리 코드는 관세청 관세법령정보포털(HS코드 조회)에서
-# 반드시 재확인하시기 바랍니다. 아래 코드는 수업 실습용 예시입니다.
-COSMETIC_HS_PRESETS = {
-    "3304991000 (기초화장용 제품류)": "3304991000",
-    "3304990000 (기타 미용 화장품류)": "3304990000",
-    "3304100000 (입술화장용 제품류)": "3304100000",
-    "3304200000 (눈화장용 제품류)": "3304200000",
-    "3304300000 (매니큐어 또는 페디큐어용 제품류)": "3304300000",
+# 뷰티 관련 HS Code 카테고리 (4단위 기준)
+# 참고: 실제 신고 기준 정확한 10자리 코드는 관세청 관세법령정보포털(HS Code 조회)에서
+# 반드시 재확인하시기 바랍니다. 아래 코드는 대표 4단위(호) 기준 분류입니다.
+BEAUTY_HS_CATEGORIES = {
+    "HS 3303류 (향수·화장수)": ["3303"],
+    "HS 3304류 (메이크업·기초화장용 제품)": ["3304"],
+    "HS 3305류 (두발용 제품류)": ["3305"],
+    "HS 3307류 (면도용·방향용 제품류 등)": ["3307"],
+    "HS 3401류 (비누·계면활성제품)": ["3401"],
 }
+BEAUTY_ALL_LABEL = "뷰티 전체 (3303/3304/3305/3307/3401 통합)"
+
+
+def get_hs_code_list(category_label: str):
+    """선택한 카테고리 라벨에 해당하는 HS Code(4단위) 리스트를 반환한다."""
+    if category_label == BEAUTY_ALL_LABEL:
+        codes = []
+        for v in BEAUTY_HS_CATEGORIES.values():
+            codes.extend(v)
+        return codes
+    return BEAUTY_HS_CATEGORIES.get(category_label, [])
 
 
 # -----------------------------
 # 데이터 수집 함수
 # -----------------------------
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_trade_data(service_key: str, strt_yymm: str, end_yymm: str, hs_sgn: str, cnty_cd: str):
-    """관세청 API를 호출해서 XML 응답을 DataFrame으로 변환한다.
-
-    반환값: (DataFrame 또는 None, 에러메시지 또는 None)
-    """
-    params = {
-        "serviceKey": service_key,
-        "strtYymm": strt_yymm,
-        "endYymm": end_yymm,
-        "cntyCd": cnty_cd,
-    }
-    if hs_sgn:
-        params["hsSgn"] = hs_sgn
-
+def parse_xml_response(xml_content: bytes):
+    """API의 XML 응답을 파싱해서 (DataFrame, 에러메시지) 튜플로 반환한다."""
     try:
-        response = requests.get(API_URL, params=params, timeout=15)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        return None, f"API 호출에 실패했습니다: {e}"
-
-    try:
-        root = ET.fromstring(response.content)
+        root = ET.fromstring(xml_content)
     except ET.ParseError:
-        return None, "API 응답을 해석할 수 없습니다. 인증키가 올바른지 확인해주세요."
+        return None, "API 응답을 해석할 수 없습니다. 잠시 후 다시 시도해주세요."
 
-    # 결과 코드 확인 (에러 응답 구조: OpenAPI_ServiceResponse / 정상: response>header)
     result_code = root.findtext(".//resultCode")
     result_msg = root.findtext(".//resultMsg")
 
@@ -101,36 +103,104 @@ def fetch_trade_data(service_key: str, strt_yymm: str, end_yymm: str, hs_sgn: st
             "품목명": item.findtext("statKor"),
             "수출중량(kg)": item.findtext("expWgt"),
             "수출금액(달러)": item.findtext("expDlr"),
-            "수입중량(kg)": item.findtext("impWgt"),
-            "수입금액(달러)": item.findtext("impDlr"),
-            "무역수지(달러)": item.findtext("balPayments"),
         })
 
     df = pd.DataFrame(rows)
-    numeric_cols = ["수출중량(kg)", "수출금액(달러)", "수입중량(kg)", "수입금액(달러)", "무역수지(달러)"]
-    for col in numeric_cols:
+    for col in ["수출중량(kg)", "수출금액(달러)"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df, None
 
 
-def fetch_multi_country(service_key, strt_yymm, end_yymm, hs_sgn, country_codes):
-    """여러 국가를 순회하며 데이터를 수집하고 하나의 DataFrame으로 합친다."""
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_trade_data(service_key: str, strt_yymm: str, end_yymm: str, hs_sgn: str, cnty_cd: str):
+    """관세청 API를 1회 호출해서 (DataFrame, 에러메시지) 튜플로 반환한다."""
+    params = {
+        "serviceKey": service_key,
+        "strtYymm": strt_yymm,
+        "endYymm": end_yymm,
+        "cntyCd": cnty_cd,
+    }
+    if hs_sgn:
+        params["hsSgn"] = hs_sgn
+
+    try:
+        response = requests.get(API_URL, params=params, timeout=15)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        return None, f"API 호출에 실패했습니다: {e}"
+
+    return parse_xml_response(response.content)
+
+
+def fetch_all(service_key: str, strt_yymm: str, end_yymm: str, hs_code_list: list, country_codes: list):
+    """선택된 국가 × HS Code 조합을 모두 반복 호출해서 하나의 DataFrame으로 합친다."""
     all_dfs = []
     errors = []
 
+    total_calls = len(country_codes) * max(len(hs_code_list), 1)
+    done = 0
     progress = st.progress(0.0, text="데이터를 불러오는 중입니다...")
-    for i, code in enumerate(country_codes):
-        df, err = fetch_trade_data(service_key, strt_yymm, end_yymm, hs_sgn, code)
-        if err:
-            errors.append(f"[{COUNTRY_MAP.get(code, code)}] {err}")
-        elif df is not None and not df.empty:
-            all_dfs.append(df)
-        progress.progress((i + 1) / len(country_codes), text=f"{COUNTRY_MAP.get(code, code)} 조회 완료")
-    progress.empty()
 
+    for cnty in country_codes:
+        hs_targets = hs_code_list if hs_code_list else [""]
+        for hs in hs_targets:
+            df, err = fetch_trade_data(service_key, strt_yymm, end_yymm, hs, cnty)
+            if err:
+                label = f"{COUNTRY_MAP.get(cnty, cnty)}"
+                if hs:
+                    label += f" / HS {hs}"
+                errors.append(f"[{label}] {err}")
+            elif df is not None and not df.empty:
+                all_dfs.append(df)
+            done += 1
+            progress.progress(done / total_calls, text=f"{COUNTRY_MAP.get(cnty, cnty)} 조회 중...")
+
+    progress.empty()
     combined = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
     return combined, errors
+
+
+def build_country_ranking(df: pd.DataFrame, top_n: int = 10):
+    """국가별 총 수출금액 순위(Top N)를 반환한다."""
+    ranking = (
+        df.groupby("국가명", as_index=False)["수출금액(달러)"]
+        .sum()
+        .sort_values("수출금액(달러)", ascending=False)
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+    ranking.index = ranking.index + 1  # 1위부터 시작
+    return ranking
+
+
+def build_hscode_ranking(df: pd.DataFrame, top_n: int = 10):
+    """HS코드(품목)별 총 수출금액 순위(Top N)를 반환한다."""
+    ranking = (
+        df.groupby(["HS코드", "품목명"], as_index=False)["수출금액(달러)"]
+        .sum()
+        .sort_values("수출금액(달러)", ascending=False)
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+    ranking.index = ranking.index + 1
+    return ranking
+
+
+def build_country_bar_chart(df: pd.DataFrame):
+    """국가별 수출금액 막대그래프를 생성한다."""
+    by_country = df.groupby("국가명", as_index=False)["수출금액(달러)"].sum()
+    by_country = by_country.sort_values("수출금액(달러)", ascending=False)
+    fig = px.bar(
+        by_country,
+        x="국가명",
+        y="수출금액(달러)",
+        text_auto=".2s",
+        color="수출금액(달러)",
+        color_continuous_scale="Reds",
+    )
+    fig.update_layout(coloraxis_showscale=False)
+    return fig
 
 
 # -----------------------------
@@ -138,57 +208,52 @@ def fetch_multi_country(service_key, strt_yymm, end_yymm, hs_sgn, country_codes)
 # -----------------------------
 st.sidebar.header("조회 조건")
 
-# 인증키는 화면에 직접 입력받지 않고, .streamlit/secrets.toml에서만 불러온다.
-# (secrets.toml 예시)
-#   SERVICE_KEY = "여기에_발급받은_인증키"
-service_key = st.secrets.get("SERVICE_KEY", "")
+# 인증키는 화면에 입력받지 않고 secrets에서만 불러온다.
+# .streamlit/secrets.toml 예시:
+#   customs_key = "여기에_발급받은_인증키"
+service_key = st.secrets.get("customs_key", "")
 
 st.sidebar.subheader("조회 기간 (최대 1년)")
 today = date.today()
+default_end = today
 default_start = date(today.year - 1, today.month, 1)
 
-col_a, col_b = st.sidebar.columns(2)
-with col_a:
-    start_date = st.date_input("시작년월", value=default_start)
-with col_b:
-    end_date = st.date_input("종료년월", value=today)
+end_date = st.sidebar.date_input("종료년월", value=default_end)
+# 종료년월을 기준으로 1년 전 날짜를 기본 시작년월로 제안하되, 1년 이내에서는 자유롭게 조정 가능
+suggested_start = date(end_date.year - 1, end_date.month, 1)
+start_date = st.sidebar.date_input("시작년월", value=suggested_start)
 
 strt_yymm = start_date.strftime("%Y%m")
 end_yymm = end_date.strftime("%Y%m")
 
-# 조회기간 1년 이내 검증
 period_months = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
 period_error = None
 if start_date > end_date:
     period_error = "시작년월이 종료년월보다 늦을 수 없습니다."
 elif period_months > 11:
-    period_error = "조회기간은 1년 이내여야 합니다. 기간을 다시 선택해주세요."
+    period_error = "조회기간은 1년(12개월) 이내여야 합니다. 시작년월을 종료년월과 더 가깝게 조정해주세요."
 
 st.sidebar.subheader("품목 (HS Code)")
-hs_sgn_input = st.sidebar.text_input(
-    "HS Code (선택, 최대 10자리)",
-    value=st.session_state.get("hs_sgn_value", ""),
-    key="hs_sgn_value",
-    help="비워두면 전체 품목을 조회합니다. 정확한 코드를 모르면 아래 화장품 프리셋을 이용하거나, "
-         "관세청 관세법령정보포털의 HS Code 조회 기능을 참고하세요.",
+category_choice = st.sidebar.selectbox(
+    "뷰티 관련 카테고리 선택",
+    options=[BEAUTY_ALL_LABEL] + list(BEAUTY_HS_CATEGORIES.keys()),
+)
+st.sidebar.caption(
+    "※ 위 카테고리는 4단위(호) 기준 대표 분류입니다. 실제 신고 기준 정확한 10자리 HS Code는 "
+    "관세청 관세법령정보포털에서 재검증이 필요합니다."
 )
 
-st.sidebar.caption("화장품(HS 3304류) 빠른 조회")
-preset_choice = st.sidebar.selectbox(
-    "프리셋 선택 후 버튼을 누르세요",
-    options=["선택 안함"] + list(COSMETIC_HS_PRESETS.keys()),
+custom_hs = st.sidebar.text_input(
+    "HS Code 직접 입력 (선택, 최대 10자리)",
+    value="",
+    help="비워두면 위에서 선택한 카테고리 기준으로 조회합니다. 값을 입력하면 이 코드가 우선 적용됩니다.",
 )
-if st.sidebar.button("프리셋 코드 적용"):
-    if preset_choice != "선택 안함":
-        st.session_state["hs_sgn_value"] = COSMETIC_HS_PRESETS[preset_choice]
-        st.rerun()
-st.sidebar.caption("※ 실제 신고 기준 정확한 10자리 코드는 관세청 기준으로 재검증이 필요합니다.")
 
 st.sidebar.subheader("국가 선택")
 selected_countries = st.sidebar.multiselect(
     "비교할 국가를 선택하세요 (여러 개 선택 가능)",
     options=list(COUNTRY_MAP.keys()),
-    default=["US", "CN", "JP"],
+    default=["US", "CN", "JP", "VN", "HK"],
     format_func=lambda code: f"{COUNTRY_MAP[code]} ({code})",
 )
 
@@ -198,11 +263,11 @@ run_query = st.sidebar.button("조회하기", type="primary")
 # -----------------------------
 # 메인 화면
 # -----------------------------
-st.title("📦 국가별 · 품목별 수출입실적 분석")
+st.title("💄 화장품 국가별 수출실적 분석")
 st.caption("데이터 출처: 관세청_품목별 국가별 수출입실적(GW) Open API (공공데이터포털)")
 
 if not service_key:
-    st.error("공공데이터포털 인증키(SERVICE_KEY)가 설정되어 있지 않습니다.")
+    st.error("공공데이터포털 인증키(customs_key)가 설정되어 있지 않습니다.")
     st.markdown(
         """
         앱 폴더에 아래와 같이 `.streamlit/secrets.toml` 파일을 만들고 인증키를 저장한 뒤,
@@ -210,14 +275,14 @@ if not service_key:
 
         ```
         프로젝트폴더/
-        ├── app.py
+        ├── main.py
         └── .streamlit/
             └── secrets.toml
         ```
 
         `secrets.toml` 내용:
         ```toml
-        SERVICE_KEY = "여기에_발급받은_인증키_붙여넣기"
+        customs_key = "여기에_발급받은_인증키_붙여넣기"
         ```
 
         ⚠️ 인증키는 민감정보이므로 깃허브 등에 코드를 올릴 때 `.gitignore`에
@@ -235,11 +300,13 @@ if not selected_countries:
     st.stop()
 
 if run_query:
-    df, errors = fetch_multi_country(
+    hs_code_list = [custom_hs.strip()] if custom_hs.strip() else get_hs_code_list(category_choice)
+
+    df, errors = fetch_all(
         service_key=service_key,
         strt_yymm=strt_yymm,
         end_yymm=end_yymm,
-        hs_sgn=hs_sgn_input.strip(),
+        hs_code_list=hs_code_list,
         country_codes=selected_countries,
     )
 
@@ -247,76 +314,53 @@ if run_query:
         st.error(e)
 
     if df.empty:
-        st.warning("조회된 데이터가 없습니다. 조회 조건(기간, 품목코드, 국가)을 확인해주세요.")
+        st.warning(
+            "조회된 데이터가 없습니다. 조회 조건(기간, HS Code, 국가)을 확인 후 다시 시도해주세요."
+        )
         st.stop()
 
-    st.session_state["trade_df"] = df
+    st.session_state["beauty_trade_df"] = df
 
-# 이전 조회 결과가 있으면 계속 표시 (재실행 시에도 유지)
-df = st.session_state.get("trade_df")
+# 이전 조회 결과가 있으면 재실행 시에도 계속 표시
+df = st.session_state.get("beauty_trade_df")
 
 if df is None:
-    st.info("조회 조건을 설정하고 '조회하기' 버튼을 눌러주세요.")
+    st.info("왼쪽 사이드바에서 조회 조건을 설정하고 '조회하기' 버튼을 눌러주세요.")
     st.stop()
 
 # -----------------------------
 # 요약 지표
 # -----------------------------
 total_exp = df["수출금액(달러)"].sum()
-total_imp = df["수입금액(달러)"].sum()
-total_balance = df["무역수지(달러)"].sum()
+total_weight = df["수출중량(kg)"].sum()
+n_countries = df["국가명"].nunique()
 
 m1, m2, m3 = st.columns(3)
 m1.metric("총 수출금액 (달러)", f"{total_exp:,.0f}")
-m2.metric("총 수입금액 (달러)", f"{total_imp:,.0f}")
-m3.metric("총 무역수지 (달러)", f"{total_balance:,.0f}")
+m2.metric("총 수출중량 (kg)", f"{total_weight:,.0f}")
+m3.metric("조회된 국가 수", f"{n_countries}개국")
 
 st.divider()
 
 # -----------------------------
-# 시각화 1: 국가별 수출 vs 수입
+# 시각화 1: 국가별 수출금액
 # -----------------------------
-st.subheader("국가별 수출금액 vs 수입금액")
-by_country = df.groupby("국가명", as_index=False)[["수출금액(달러)", "수입금액(달러)"]].sum()
-by_country_melted = by_country.melt(id_vars="국가명", var_name="구분", value_name="금액(달러)")
-
-fig_bar = px.bar(
-    by_country_melted,
-    x="국가명",
-    y="금액(달러)",
-    color="구분",
-    barmode="group",
-    text_auto=".2s",
-)
-fig_bar.update_layout(legend_title_text="")
-st.plotly_chart(fig_bar, use_container_width=True)
+st.subheader("국가별 수출금액")
+st.plotly_chart(build_country_bar_chart(df), use_container_width=True)
 
 # -----------------------------
-# 시각화 2: 무역수지 추이
-# -----------------------------
-st.subheader("기간별 무역수지 추이")
-by_period = df.groupby(["기간", "국가명"], as_index=False)["무역수지(달러)"].sum()
-by_period = by_period.sort_values("기간")
-
-fig_line = px.line(
-    by_period,
-    x="기간",
-    y="무역수지(달러)",
-    color="국가명",
-    markers=True,
-)
-st.plotly_chart(fig_line, use_container_width=True)
-
-# -----------------------------
-# 시각화 3: 수출금액 Top N 순위
+# 시각화 2: 수출금액 기준 국가 순위 Top N
 # -----------------------------
 st.subheader("수출금액 기준 국가 순위")
-top_n = st.slider("표시할 국가 수", min_value=3, max_value=len(COUNTRY_MAP), value=min(10, len(by_country)))
-ranking = by_country.sort_values("수출금액(달러)", ascending=False).head(top_n)
-st.dataframe(
-    ranking[["국가명", "수출금액(달러)", "수입금액(달러)"]].reset_index(drop=True),
-    use_container_width=True,
-)
+top_n_country = st.slider("국가 순위 표시 개수", min_value=3, max_value=len(COUNTRY_MAP), value=10, key="top_n_country")
+st.dataframe(build_country_ranking(df, top_n_country), use_container_width=True)
+
+# -----------------------------
+# 품목코드(HS Code) 순위
+# -----------------------------
+st.subheader("품목코드(HS Code) 순위")
+top_n_hs = st.slider("품목 순위 표시 개수", min_value=3, max_value=20, value=10, key="top_n_hs")
+st.dataframe(build_hscode_ranking(df, top_n_hs), use_container_width=True)
 
 st.divider()
 
@@ -331,6 +375,6 @@ df.to_csv(csv_buffer, index=False, encoding="utf-8-sig")
 st.download_button(
     label="CSV로 다운로드",
     data=csv_buffer.getvalue(),
-    file_name=f"trade_data_{strt_yymm}_{end_yymm}.csv",
+    file_name=f"beauty_export_{strt_yymm}_{end_yymm}.csv",
     mime="text/csv",
 )
