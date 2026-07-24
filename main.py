@@ -17,6 +17,7 @@ from urllib.parse import quote
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 from requests.adapters import HTTPAdapter
@@ -447,12 +448,31 @@ w_competition = st.sidebar.slider("경쟁 낮음 가중치", 0, 100, 40)
 w_awareness = st.sidebar.slider("K뷰티 인지도 가중치", 0, 100, 20)
 
 _w_sum = max(w_growth + w_competition + w_awareness, 1e-9)
+_w_pcts = {
+    "성장성": w_growth / _w_sum * 100,
+    "경쟁 낮음": w_competition / _w_sum * 100,
+    "K뷰티 인지도": w_awareness / _w_sum * 100,
+}
 st.sidebar.caption(
-    f"실제 반영 비율 → 성장성 {w_growth/_w_sum*100:.0f}% · "
-    f"경쟁 낮음 {w_competition/_w_sum*100:.0f}% · "
-    f"K뷰티 인지도 {w_awareness/_w_sum*100:.0f}% "
-    "(세 슬라이더 합이 100이 아니어도 비율로 자동 환산되어 계산됩니다.)"
+    "세 슬라이더 합이 100이 아니어도 아래 비율로 자동 환산되어 계산됩니다."
 )
+
+fig_weights = go.Figure()
+_colors = {"성장성": "#EF553B", "경쟁 낮음": "#636EFA", "K뷰티 인지도": "#00CC96"}
+for label, pct in _w_pcts.items():
+    fig_weights.add_trace(go.Bar(
+        y=["가중치"], x=[pct], name=label, orientation="h",
+        text=f"{label} {pct:.0f}%", textposition="inside",
+        marker_color=_colors[label],
+    ))
+fig_weights.update_layout(
+    barmode="stack", height=110,
+    margin=dict(l=0, r=0, t=5, b=5),
+    showlegend=False,
+    xaxis=dict(visible=False, range=[0, 100]),
+    yaxis=dict(visible=False),
+)
+st.sidebar.plotly_chart(fig_weights, use_container_width=True, config={"displayModeBar": False})
 
 run_screening = st.sidebar.button("🔍 스크리닝 실행", type="primary")
 
