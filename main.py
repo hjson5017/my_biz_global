@@ -25,7 +25,7 @@ from urllib3.util.retry import Retry
 # =========================================================
 # 기본 설정
 # =========================================================
-st.set_page_config(page_title="K-Beauty 숨어있는 글로벌 기회시장 발굴 Project", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="K-Beauty 숨어있는 글로벌 시장 발굴 Project", page_icon="🌍", layout="wide")
 
 CUSTOMS_API_URL = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
 KOTRA_NATNINFO_API_URL = "https://apis.data.go.kr/B410001/kotra_nationalInformation/natnInfo/natnInfo"
@@ -445,6 +445,14 @@ st.sidebar.subheader("스코어 가중치")
 w_growth = st.sidebar.slider("성장성 가중치", 0, 100, 40)
 w_competition = st.sidebar.slider("경쟁 낮음 가중치", 0, 100, 40)
 w_awareness = st.sidebar.slider("K뷰티 인지도 가중치", 0, 100, 20)
+
+_w_sum = max(w_growth + w_competition + w_awareness, 1e-9)
+st.sidebar.caption(
+    f"실제 반영 비율 → 성장성 {w_growth/_w_sum*100:.0f}% · "
+    f"경쟁 낮음 {w_competition/_w_sum*100:.0f}% · "
+    f"K뷰티 인지도 {w_awareness/_w_sum*100:.0f}% "
+    "(세 슬라이더 합이 100이 아니어도 비율로 자동 환산되어 계산됩니다.)"
+)
 
 run_screening = st.sidebar.button("🔍 스크리닝 실행", type="primary")
 
