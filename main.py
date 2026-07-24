@@ -25,7 +25,7 @@ from urllib3.util.retry import Retry
 # =========================================================
 # 기본 설정
 # =========================================================
-st.set_page_config(page_title="K-Beauty 숨어있는 글로벌 시장 발굴 Project", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="K-Beauty 숨어있는 글로벌 기회시장 발굴 Project", page_icon="🌍", layout="wide")
 
 CUSTOMS_API_URL = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
 KOTRA_NATNINFO_API_URL = "https://apis.data.go.kr/B410001/kotra_nationalInformation/natnInfo/natnInfo"
