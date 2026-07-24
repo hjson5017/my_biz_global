@@ -28,7 +28,7 @@ from urllib3.util.retry import Retry
 st.set_page_config(page_title="K-Beauty 숨어있는 글로벌 시장 발굴 Project", page_icon="🌍", layout="wide")
 
 CUSTOMS_API_URL = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
-KOTRA_NATNINFO_API_URL = "https://apis.data.go.kr/B410001/kotra_nationalInformation/natnInfo"
+KOTRA_NATNINFO_API_URL = "https://apis.data.go.kr/B410001/kotra_nationalInformation/natnInfo/natnInfo"
 
 # 정적 데이터 파일 기본 경로 (Streamlit Cloud 배포 시 저장소에 이 경로로 커밋해두면 자동으로 읽힙니다)
 DEFAULT_KOTRA_XLSX_PATH = "data/kotra_promising_market.xlsx"
